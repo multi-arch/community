@@ -68,30 +68,32 @@ tags, and then generate with `hack/update-toc.sh`.
 -->
 
 <!-- toc -->
-- [Summary](#summary)
-- [Motivation](#motivation)
-  - [Goals](#goals)
-  - [Non-Goals](#non-goals)
-  - [Use Cases](#use-cases)
-  - [Requirements](#requirements)
-- [Proposal](#proposal)
-  - [Notes and Caveats](#notes-and-caveats)
-- [Design Details](#design-details)
-- [Design Evaluation](#design-evaluation)
-  - [Reusability](#reusability)
-  - [Simplicity](#simplicity)
-  - [Flexibility](#flexibility)
-  - [User Experience](#user-experience)
-  - [Performance](#performance)
-  - [Risks and Mitigations](#risks-and-mitigations)
-  - [Drawbacks](#drawbacks)
-- [Alternatives](#alternatives)
-- [Implementation Plan](#implementation-plan)
-  - [Test Plan](#test-plan)
-  - [Infrastructure Needed](#infrastructure-needed)
-  - [Upgrade and Migration Strategy](#upgrade-and-migration-strategy)
-  - [Implementation Pull Requests](#implementation-pull-requests)
-- [References](#references)
+- [TEP-0161: Set podTemplate in Tasks](#tep-0161-set-podtemplate-in-tasks)
+  - [Summary](#summary)
+  - [Motivation](#motivation)
+    - [Goals](#goals)
+    - [Non-Goals](#non-goals)
+    - [Use Cases](#use-cases)
+    - [Requirements](#requirements)
+  - [Proposal](#proposal)
+    - [Notes and Caveats](#notes-and-caveats)
+  - [Design Details](#design-details)
+  - [Design Evaluation](#design-evaluation)
+    - [Reusability](#reusability)
+    - [Simplicity](#simplicity)
+    - [Flexibility](#flexibility)
+    - [Conformance](#conformance)
+    - [User Experience](#user-experience)
+    - [Performance](#performance)
+    - [Risks and Mitigations](#risks-and-mitigations)
+    - [Drawbacks](#drawbacks)
+  - [Alternatives](#alternatives)
+  - [Implementation Plan](#implementation-plan)
+    - [Test Plan](#test-plan)
+    - [Infrastructure Needed](#infrastructure-needed)
+    - [Upgrade and Migration Strategy](#upgrade-and-migration-strategy)
+    - [Implementation Pull Requests](#implementation-pull-requests)
+  - [References](#references)
 <!-- /toc -->
 
 ## Summary
@@ -113,6 +115,11 @@ updates.
 [documentation style guide]: https://github.com/kubernetes/community/blob/master/contributors/guide/style-guide.md
 -->
 
+This TEP proposes a feature to enable podTemplate to be set at the Task level and be parameterized via Matrix in a Pipeline. 
+Tekton does not currently provide a way to set podTemplate anywhere but on TaskRuns (and via taskRunSpecs in PipelineRuns).
+
+See #6742 for an existing discussion. 
+
 ## Motivation
 
 <!--
@@ -124,6 +131,11 @@ to demonstrate the interest in a TEP within the wider Tekton community.
 [experience reports]: https://github.com/golang/go/wiki/ExperienceReports
 -->
 
+The motivation here is to more easily support building multi-arch images on clusters with nodes of multiple architectures.
+
+Task/Pipeline authors currently do not have the flexibility to "fan out" tasks to nodes of a specified arch and must duplicate TaskRuns to achieve the desired effect. For example, making a duplicate Task for each arch and specifying podTemplate via taskRunSpecs for each one. 
+
+
 ### Goals
 
 <!--
@@ -131,6 +143,10 @@ List the specific goals of the TEP.
 - What is it trying to achieve?
 - How will we know that this has succeeded?
 -->
+
+- Enable builds to be easily scheduled on nodes of multiple architectures
+- Simplify specifying podTemplate for Tasks/TaskRuns
+- Parametrize podTemplate with Matrix
 
 ### Non-Goals
 
@@ -151,6 +167,11 @@ Consider the user's:
 
 [role]: https://github.com/tektoncd/community/blob/main/user-profiles.md
 -->
+
+- Authors of Tasks and Pipelines can parameterize podTemplate via Matrix
+
+- Authors of Tasks and Pipelines can use this feature to easily schedule builds on nodes of multiple architectures, and 
+create the resulting manifest list (/ image index: https://github.com/opencontainers/image-spec/blob/main/image-index.md)
 
 ### Requirements
 
@@ -197,12 +218,60 @@ of the file, but general guidance is to include at least TEP number in the
 file name, for example, "/teps/images/NNNN-workflow.jpg".
 -->
 
+Add a podTemplate field to the Task spec (as is already done with TaskRuns), and implement param substitution on this
+field to enable Matrix to fan out params to the podTemplate object. This can be used in a pipeline as such:
+
+```
+kind: PipelineRun
+metadata:
+  generateName: matrixed-pipelinerun-
+spec:
+  pipelineSpec:
+    tasks:
+      - name: build-and-push-manifest
+        matrix:
+          params:
+          - name: arch
+            value: 
+              - "amd64"
+              - "arm64"
+        taskSpec:
+          results:
+            - name: manifest
+              type: string
+          params:
+            - name: arch
+          podTemplate:
+            nodeSelector:
+              kubernetes.io/arch: $(params.arch)
+          steps:
+            - name: build-and-push
+              image: ubuntu
+              script: |
+                echo "building on $(params.arch)"
+                echo "testmanifest-$(params.arch)" | tee $(results.manifest.path)
+      - name: create-manifest-list
+        params:
+          - name: manifest
+            value: $(tasks.build-and-push-manifest.results.manifest[*])
+        taskSpec:
+          steps:
+            - name: echo-manifests
+              image: ubuntu
+              args: ["$(params.manifest[*])"]
+              script: echo "$@"
+```
+
+When a TaskRun specifies fields in the podTemplate, those fields override those specified in the related Task. 
 
 ## Design Evaluation
 <!--
 How does this proposal affect the api conventions, reusability, simplicity, flexibility
 and conformance of Tekton, as described in [design principles](https://github.com/tektoncd/community/blob/master/design-principles.md)
 -->
+
+This largely slots into Tekton's existing design, with changes being somewhat minimal. 
+This enhances Tekton's flexibility by adding the ability to modify podTemplate fields with Matrix params.
 
 ### Reusability
 
@@ -213,6 +282,8 @@ https://github.com/tektoncd/community/blob/main/design-principles.md#reusability
 - Is the problem being solved an authoring-time or runtime-concern? Is the proposed feature at the appropriate level
 authoring or runtime?
 -->
+
+A related feature is the ability to set podTemplate in Pipeline.TaskRunSpecs and on TaskRuns themselves. 
 
 ### Simplicity
 
@@ -226,6 +297,13 @@ https://github.com/tektoncd/community/blob/main/design-principles.md#simplicity
 - Are there any implicit behaviors in the proposal? Would users expect these implicit behaviors or would they be
 surprising? Are there security implications for these implicit behaviors?
 -->
+
+This should overall simplify the user experience of running Tasks on nodes of multiple architectures.
+
+Current user experience: create multiple Tasks/TaskRuns for each architecture and specify podTemplate in Pipeline.TaskRunSpecs. Or otherwise duplicate TaskRuns in a different configuration.
+
+User experience after this change: have full flexibility with Matrix + params on all fields of the podTemplate. Create a 
+single task instead of multiple for each arch. Gather results easily from multiple Tasks. 
 
 ### Flexibility
 
@@ -251,6 +329,8 @@ https://github.com/tektoncd/community/blob/main/design-principles.md#conformance
 - If the API is changing as a result of this proposal, what updates are needed to the
 [API spec](https://github.com/tektoncd/pipeline/blob/main/docs/api-spec.md)?
 -->
+
+Task.spec (TaskSpec) API will change to include podTemplate. 
 
 ### User Experience
 
@@ -303,6 +383,8 @@ not need to be as detailed as the proposal, but should include enough
 information to express the idea and why it was not acceptable.
 -->
 
+Possibly adding more functionality to Pipeline.TaskRunSpecs (like growing matrix functionality). This was considered
+more complex than adding podTemplate to Tasks.
 
 ## Implementation Plan
 
@@ -326,6 +408,9 @@ challenging to test should be called out.
 All code is expected to have adequate tests (eventually with coverage
 expectations).
 -->
+
+Unit, integration, and e2e tests. Something that may require some tweaking is simulating multi-arch nodes but this is
+a big unknown at the moment. 
 
 ### Infrastructure Needed
 
@@ -367,3 +452,6 @@ Use this section to add links to GitHub issues, other TEPs, design docs in Tekto
 shared drive, examples, etc. This is useful to refer back to any other related links
 to get more details.
 -->
+
+https://github.com/tektoncd/pipeline/issues/6742
+https://github.com/tektoncd/pipeline/pull/8599 (WIP PR, includes an example Pipeline)
